@@ -1,0 +1,5 @@
+*.mp4
+*.png
+*.wav
+tmp_audio/
+__pycache__/
