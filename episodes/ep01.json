@@ -1,0 +1,20 @@
+{
+  "meta": {"title": "中式英语急救室", "series": "你能答对几题？· 第 1 期"},
+  "hook": ["这 3 句英语", "90% 的人说错！", "看完评论区报分"],
+  "cover": ["这 3 句英语", "90%的人说错", "你中招了吗？"],
+  "questions": [
+    {"prompt": "“我好无聊啊”",
+     "options": ["I'm so boring.", "I'm so bored."], "answer": 1,
+     "why": "bored 形容人的感受；boring 形容让人无聊的东西。说 I'm boring 意思变成了“我这个人很无趣”。",
+     "extra": "This movie is boring."},
+    {"prompt": "“我同意你的看法”",
+     "options": ["I am agree with you.", "I agree with you."], "answer": 1,
+     "why": "agree 本身就是动词，前面不需要再加 am。这是中文“我是同意的”直译带来的常见错误。",
+     "extra": "I totally agree."},
+    {"prompt": "“我手机没电了”",
+     "options": ["My phone has no electricity.", "My phone is dead."], "answer": 1,
+     "why": "英语里手机、电池没电，习惯说 dead 或 died。no electricity 一般指停电、家里没通电。",
+     "extra": "My phone died."}
+  ],
+  "outro": ["你答对了几题？", "评论区告诉我！", "关注我 · 每天一期"]
+}
