@@ -1,31 +1,85 @@
 #!/usr/bin/env python3
-"""选择题纠错短视频 v2（无人声）：PIL 画面 + 合成音效 + ffmpeg。
+"""选择题纠错短视频 v2.1（无人声）：PIL 画面 + 合成音效 + ffmpeg。
 用法: python3 quiz_video.py script.json out.mp4 cover.png
 """
 import json, math, subprocess, sys, wave
 import numpy as np
 from PIL import Image, ImageDraw
-from make_video import (W, H, FPS, SR, FONT_B, FONT_R, FONT_K, font, tone, rrect,
+import make_video as mv
+from make_video import (W, H, FPS, FONT_B, FONT_R, FONT_K, font, tone, rrect,
                         wrap, line_width, draw_marked, ease_out)
+SR = 48000; mv.SR = SR            # v2.1：48kHz 音频
 
 BG = (255, 246, 228); NAVY = (31, 52, 120); YEL = (255, 200, 40)
 RED = (230, 70, 70); GRN = (46, 170, 100); INK = (35, 35, 45)
 
 # ------------------------------------------------------------ audio
-def buzz(dur=0.35, vol=0.18):
-    t = np.arange(int(SR * dur)) / SR
-    return vol * np.sign(np.sin(2 * np.pi * 140 * t)) * np.exp(-5 * t)
+def env(n, attack=0.004, decay=6.0):
+    t = np.arange(n) / SR
+    e = np.exp(-decay * t)
+    k = int(attack * SR)
+    if k > 0: e[:k] *= np.linspace(0, 1, k)
+    return e
+
+def osc(freq, dur, vol, decay, harm=((1, 1.0),), attack=0.004):
+    n = int(SR * dur); t = np.arange(n) / SR
+    sig = sum(a * np.sin(2 * np.pi * freq * m * t) for m, a in harm)
+    return vol * sig * env(n, attack, decay)
+
+def lowpass(x, fc):
+    """一阶低通，让音效更柔和。"""
+    a = math.exp(-2 * math.pi * fc / SR)
+    y = np.empty_like(x); acc = 0.0
+    for i, v in enumerate(x):
+        acc = (1 - a) * v + a * acc; y[i] = acc
+    return y
+
+def place(out, start, sig):
+    s0 = int(start * SR); e = min(len(out), s0 + len(sig))
+    if e > s0: out[s0:e] += sig[:e - s0]
+
+def wrong_sfx():
+    """答错：柔和的两声下行“嘟—嘟”，替代原来刺耳的方波。"""
+    out = np.zeros(int(SR * 0.7))
+    place(out, 0.0, osc(392.0, 0.24, 0.17, 9, ((1, 1), (2, 0.3), (3, 0.08))))
+    place(out, 0.15, osc(293.7, 0.45, 0.17, 6, ((1, 1), (2, 0.3), (3, 0.08))))
+    return lowpass(out, 1800)
 
 def ding():
-    a = tone(1046.5, 0.8, 0.22, 5); b = tone(1568, 0.7, 0.18, 5)
-    o = int(0.09 * SR); a[o:o + len(b)] += b[:len(a) - o]
-    return a
+    """答对：钟琴质感的两音上行（多层泛音叠加）。"""
+    bell = ((1, 1.0), (2.0, 0.35), (3.0, 0.12), (4.2, 0.05))
+    out = np.zeros(int(SR * 1.3))
+    place(out, 0.0, osc(1046.5, 1.1, 0.16, 4.5, bell, 0.002))
+    place(out, 0.09, osc(1568.0, 1.1, 0.15, 4.0, bell, 0.002))
+    place(out, 0.0, osc(523.25, 0.6, 0.05, 5))          # 低八度垫底，更饱满
+    return out
 
 def pop():
-    t = np.arange(int(SR * 0.08)) / SR
-    return 0.15 * np.sin(2 * np.pi * (600 + 2500 * t) * t) * np.exp(-30 * t)
+    """选项出现：轻柔的“啵”。"""
+    n = int(SR * 0.09); t = np.arange(n) / SR
+    s = 0.10 * np.sin(2 * np.pi * (500 + 1800 * t) * t) * env(n, 0.002, 35)
+    return lowpass(s, 4000)
 
-def tick(): return tone(1800, 0.06, 0.12, 40)
+def tick():
+    """倒计时：木鱼质感。"""
+    return osc(1250, 0.07, 0.11, 55, ((1, 1), (2.7, 0.35), (5.1, 0.1)), 0.001)
+
+def whoosh(dur=0.32, vol=0.05):
+    """换题转场：过滤后的气流声。"""
+    rng = np.random.default_rng(7)
+    n = int(SR * dur); t = np.linspace(0, 1, n)
+    noise = lowpass(rng.standard_normal(n), 2500)
+    return vol * noise * np.sin(np.pi * t) ** 2 / (np.abs(noise).max() + 1e-9) * 3
+
+def reverb(x, seed):
+    """简单卷积混响：左右声道用不同的衰减噪声，形成立体空间感。"""
+    rng = np.random.default_rng(seed)
+    n = int(SR * 0.9); t = np.arange(n) / SR
+    ir = rng.standard_normal(n) * np.exp(-t / 0.22)
+    ir[:int(SR * 0.012)] = 0
+    ir /= np.sqrt((ir ** 2).sum())
+    m = len(x) + n - 1; N = 1 << (m - 1).bit_length()
+    return np.fft.irfft(np.fft.rfft(x, N) * np.fft.rfft(ir, N), N)[:len(x)]
 
 def music(total):
     out = np.zeros(int(SR * total) + SR)
@@ -42,12 +96,17 @@ def music(total):
 
 # ------------------------------------------------------------ drawing
 def background():
-    img = Image.new("RGB", (W, H), BG)
+    """比画面大一圈的点阵底图，每帧裁切不同位置，让背景缓慢漂移。"""
+    img = Image.new("RGB", (W + 60, H + 120), BG)
     d = ImageDraw.Draw(img)
-    for y in range(0, H, 60):
-        for x in range((y // 60) % 2 * 30, W, 60):
+    for y in range(0, H + 120, 60):
+        for x in range((y // 60) % 2 * 30, W + 60, 60):
             d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(245, 230, 200))
     return img
+
+def bg_at(big, tt):
+    ox = int(tt * 14) % 60; oy = int(tt * 9) % 120
+    return big.crop((ox, oy, ox + W, oy + H))
 
 def check(d, cx, cy, s, col):
     d.ellipse([cx - s, cy - s, cx + s, cy + s], fill=col)
@@ -83,11 +142,11 @@ def option_card(d, box, letter, text, state, alpha_p=1.0):
     if state == "right": check(d, x1 - 80, cy, 46, GRN)
     if state == "wrong": cross(d, x1 - 80, cy, 46, RED)
 
-def ring(d, cx, cy, r, frac, num):
+def ring(d, cx, cy, r, frac, num, pulse=0.0):
     d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(255, 255, 255), outline=(230, 220, 200), width=14)
     if frac > 0:
         d.arc([cx - r, cy - r, cx + r, cy + r], -90, -90 + 360 * frac, fill=YEL, width=14)
-    d.text((cx, cy), str(num), font=font(FONT_K, 90), fill=NAVY, anchor="mm")
+    d.text((cx, cy), str(num), font=font(FONT_K, int(90 * (1 + 0.35 * pulse))), fill=NAVY, anchor="mm")
 
 def multiline_center(d, text, fnt, y, maxw, col, hi=(230, 90, 40), gap=1.35):
     for l in wrap(text, fnt, maxw, d) if " " in text else [text]:
@@ -159,36 +218,49 @@ def main(sp, out, cover_out):
         segs.append(dict(kind="q", s=t, e=t + QLEN, i=i, q=q)); t += QLEN
     segs.append(dict(kind="outro", s=t, e=t + outro_len)); total = t + outro_len
 
-    # 音频
-    audio = music(total); sfx = []
+    # 音频：背景音乐（不变）+ 新音效，48kHz 立体声，音效带混响
+    n_a = int(SR * total) + SR
+    fx = np.zeros(n_a)
     for sg in segs:
         if sg["kind"] != "q": continue
         s0 = sg["s"]
         if sg["i"] > 0:
-            for k in range(len(sg["q"]["options"])): sfx.append((s0 + 0.05 + k * 0.12, pop()))
-        for k in range(2): sfx.append((s0 + T_IN + k, tick()))
+            place(fx, s0 - 0.12, whoosh())
+            for k in range(len(sg["q"]["options"])): place(fx, s0 + 0.18 + k * 0.1, pop())
+        for k in range(2): place(fx, s0 + T_IN + k, tick())
         r = s0 + T_IN + T_CD
-        sfx.append((r, buzz())); sfx.append((r + 0.4, ding()))
-    sfx.append((total - outro_len, ding()))
-    for st, a in sfx:
-        s = int(st * SR); e = min(len(audio), s + len(a)); audio[s:e] += a[:e - s]
-    audio = np.clip(audio, -1, 1)
+        place(fx, r, wrong_sfx()); place(fx, r + 0.38, ding())
+    place(fx, total - outro_len - 0.12, whoosh())
+    place(fx, total - outro_len + 0.2, ding())
+    mus = np.zeros(n_a); m = music(total); mus[:len(m)] += m
+    d_r = int(0.011 * SR)                      # 右声道微延迟，让音乐更宽
+    mus_r = np.concatenate([np.zeros(d_r), mus[:-d_r]])
+    L = mus + fx + 0.22 * reverb(fx, 1)
+    R = 0.9 * mus + 0.1 * mus_r + fx + 0.22 * reverb(fx, 2)
+    st = np.stack([L, R], axis=1)[:int(SR * total)]
+    st /= max(1.0, np.abs(st).max() / 0.95)
     with wave.open("tmp_audio/quiz.wav", "wb") as w:
-        w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
-        w.writeframes((audio * 32767).astype(np.int16).tobytes())
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(SR)
+        w.writeframes((st * 32767).astype(np.int16).tobytes())
 
     bg = background()
     ff = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo",
                            "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
-                           "-i", "tmp_audio/quiz.wav", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest",
+                           "-i", "tmp_audio/quiz.wav",
+                           # v2.1：更高画质，色彩按 BT.709 转换，给抖音二次压缩留余量
+                           "-vf", "scale=out_color_matrix=bt709:out_range=tv:flags=accurate_rnd+full_chroma_int",
+                           "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-tune", "animation",
+                           "-profile:v", "high", "-pix_fmt", "yuv420p",
+                           "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                           "-af", "loudnorm=I=-14:TP=-1.5:LRA=11", "-ar", "48000",
+                           "-c:a", "aac", "-b:a", "192k", "-shortest",
                            "-movflags", "+faststart", out], stdin=subprocess.PIPE)
 
     follow_q = min(1, len(qs) - 1)   # 第 2 题解释阶段出关注提示
 
     def render(tt):
         sg = next((x for x in segs if x["s"] <= tt < x["e"]), segs[-1])
-        img = bg.copy(); d = ImageDraw.Draw(img)
+        img = bg_at(bg, tt); d = ImageDraw.Draw(img)
         lt = tt - sg["s"]
         if sg["kind"] == "q":
             q, i = sg["q"], sg["i"]
@@ -205,8 +277,7 @@ def main(sp, out, cover_out):
             oy = y + 165
             for k, opt in enumerate(q["options"]):
                 # 第 1 题第一帧就完整显示；之后的题快速滑入
-                p = 1.0 if i == 0 else ease_out((lt - 0.05 - k * 0.12) / 0.25)
-                if p <= 0: continue
+                p = 1.0
                 right = (k == q["answer"])
                 state = "normal"
                 if revealed:
@@ -216,11 +287,15 @@ def main(sp, out, cover_out):
                 if state == "wrong" and lt < T_IN + T_CD + 0.4:
                     dx = int(14 * math.sin((lt - T_IN - T_CD) * 60))
                 xo = int(-W * (1 - p)) + dx
-                option_card(d, (60 + xo, oy, W - 60 + xo, oy + 185), "ABC"[k], opt, state)
+                g = 0
+                u = (lt - T_IN - T_CD - 0.38) / 0.4          # 答对的卡片轻微弹一下
+                if state == "right" and 0 <= u <= 1: g = int(12 * math.sin(math.pi * u))
+                option_card(d, (60 + xo - g, oy - g, W - 60 + xo + g, oy + 185 + g), "ABC"[k], opt, state)
                 oy += 220
             if lt < T_IN + T_CD:
                 c = max(0.0, lt - T_IN)
-                ring(d, W / 2, oy + 120, 85, c / T_CD if lt >= T_IN else 0, 2 - int(c) if lt >= T_IN else 2)
+                pulse = (1 - (c % 1.0)) ** 3 if lt >= T_IN else 0.0
+                ring(d, W / 2, oy + 120, 85, c / T_CD if lt >= T_IN else 0, 2 - int(c) if lt >= T_IN else 2, pulse)
             if lt >= T_IN + T_CD + T_REV:
                 p = ease_out((lt - T_IN - T_CD - T_REV) / 0.3)
                 top = oy + 25 + int(50 * (1 - p))
@@ -264,13 +339,29 @@ def main(sp, out, cover_out):
                 d.text((W / 2, 1245), o[2], font=fit_font(d, o[2], FONT_B, 50, 600), fill=(255, 255, 255), anchor="mm")
         return img
 
+    TR = 0.3   # 换题转场时长：上一题向左滑出，新一题从右滑入（标题栏不动）
+    def frame_at(tt):
+        cur = render(tt)
+        sg = next((x for x in segs if x["s"] <= tt < x["e"]), segs[-1])
+        lt = tt - sg["s"]
+        if sg["s"] > 0 and lt < TR:
+            prev = render(sg["s"] - 1.0 / FPS)
+            p = ease_out(lt / TR)
+            body_prev = prev.crop((0, 150, W, H)); body_cur = cur.crop((0, 150, W, H))
+            out_img = bg_at(bg, tt)
+            out_img.paste(cur.crop((0, 0, W, 150)), (0, 0))
+            out_img.paste(body_prev, (int(-W * p), 150))
+            out_img.paste(body_cur, (int(W * (1 - p)), 150))
+            return out_img
+        return cur
+
     n = int(total * FPS)
     for fi in range(n):
-        ff.stdin.write(render(fi / FPS).tobytes())
+        ff.stdin.write(frame_at(fi / FPS).tobytes())
     ff.stdin.close(); ff.wait()
 
     # 封面（第一帧之外单独上传的封面）
-    cv = bg.copy(); d = ImageDraw.Draw(cv)
+    cv = bg_at(bg, 0); d = ImageDraw.Draw(cv)
     header(d, meta, None)
     for k, l in enumerate(S["cover"]):
         col = RED if k == 1 else INK
