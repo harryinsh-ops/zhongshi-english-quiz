@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""选择题纠错短视频（无人声）：PIL 画面 + 合成音效 + ffmpeg。
+"""选择题纠错短视频 v2（无人声）：PIL 画面 + 合成音效 + ffmpeg。
 用法: python3 quiz_video.py script.json out.mp4 cover.png
 """
 import json, math, subprocess, sys, wave
@@ -60,14 +60,6 @@ def cross(d, cx, cy, s, col):
     d.line([cx - k, cy - k, cx + k, cy + k], fill=(255, 255, 255), width=int(s * .22))
     d.line([cx - k, cy + k, cx + k, cy - k], fill=(255, 255, 255), width=int(s * .22))
 
-def header(d, meta, qtxt):
-    d.rectangle([0, 0, W, 260], fill=NAVY)
-    d.text((W / 2, 60), meta["title"], font=font(FONT_K, 74), fill=(255, 255, 255), anchor="ma")
-    d.text((W / 2, 170), meta["series"], font=font(FONT_R, 40), fill=(200, 215, 255), anchor="ma")
-    if qtxt:
-        rrect(d, [W / 2 - 150, 225, W / 2 + 150, 305], 40, YEL)
-        d.text((W / 2, 265), qtxt, font=font(FONT_K, 44), fill=INK, anchor="mm")
-
 def option_card(d, box, letter, text, state, alpha_p=1.0):
     x0, y0, x1, y1 = box
     fill, edge, lc = (255, 255, 255), NAVY, NAVY
@@ -104,36 +96,79 @@ def multiline_center(d, text, fnt, y, maxw, col, hi=(230, 90, 40), gap=1.35):
         y += int(fnt.size * gap)
     return y
 
+def _tokens(text):
+    """英文单词/数字连在一起作为一个词，中文逐字。"""
+    import re
+    return re.findall(r"[A-Za-z0-9'’.,?!:;%$\-]+|\s|.", text)
+
+NO_START = set("，。、；：？！）》」』”’,.;:?!)%")
+
 def zh_wrap(text, fnt, maxw, d):
     lines, cur = [], ""
-    for ch in text:
-        if d.textlength(cur + ch, font=fnt) > maxw:
-            lines.append(cur); cur = ch
+    for tk in _tokens(text):
+        if cur == "" and tk == " ": continue
+        if d.textlength(cur + tk, font=fnt) > maxw and cur.strip():
+            if tk in NO_START:            # 标点不放行首：挂在上一行末尾
+                cur += tk; continue
+            lines.append(cur.rstrip()); cur = "" if tk == " " else tk
         else:
-            cur += ch
-    if cur: lines.append(cur)
+            cur += tk
+    if cur.strip(): lines.append(cur.rstrip())
     return lines
+
+def balanced_lines(text, path, size, maxw, d, minsize=50):
+    """先缩小字号争取一行；放不下就分两行并尽量等长。"""
+    f = font(path, size)
+    while d.textlength(text, font=f) > maxw and size > minsize:
+        size -= 2; f = font(path, size)
+    if d.textlength(text, font=f) <= maxw:
+        return f, [text]
+    total = d.textlength(text, font=f)
+    for target in range(int(total / 2), int(maxw), 20):
+        ls = zh_wrap(text, f, target, d)
+        if len(ls) <= 2: return f, ls
+    return f, zh_wrap(text, f, maxw, d)
+
+def header(d, meta, qtxt):
+    """v2：压缩后的标题栏（150px），题号放在栏内右侧。"""
+    d.rectangle([0, 0, W, 150], fill=NAVY)
+    d.text((60, 75), meta["title"], font=font(FONT_K, 56), fill=(255, 255, 255), anchor="lm")
+    tw = d.textlength(meta["title"], font=font(FONT_K, 56))
+    d.text((60 + tw + 24, 82), meta["series"], font=font(FONT_R, 34), fill=(200, 215, 255), anchor="lm")
+    if qtxt:
+        rrect(d, [W - 250, 42, W - 50, 108], 33, YEL)
+        d.text((W - 150, 75), qtxt, font=font(FONT_K, 38), fill=INK, anchor="mm")
+
+def fit_font(d, text, path, size, maxw, minsize=30):
+    f = font(path, size)
+    while d.textlength(text, font=f) > maxw and size > minsize:
+        size -= 2; f = font(path, size)
+    return f
+
 
 # ------------------------------------------------------------ main
 def main(sp, out, cover_out):
     S = json.load(open(sp, encoding="utf-8"))
     meta, qs = S["meta"], S["questions"]
-    T_IN, T_CD, T_REV, T_EXP = 2.4, 3.0, 1.6, 5.2
-    hook_len, outro_len = 3.2, 3.6
-    segs, t = [dict(kind="hook", s=0, e=hook_len)], hook_len
+    # v2 节奏：第一帧就是第 1 题，没有单独的钩子
+    T_IN, T_CD, T_REV, T_EXP = 1.2, 2.0, 1.2, 4.4
+    outro_len = 3.4
+    QLEN = T_IN + T_CD + T_REV + T_EXP
+    segs, t = [], 0.0
     for i, q in enumerate(qs):
-        segs.append(dict(kind="q", s=t, e=t + T_IN + T_CD + T_REV + T_EXP, i=i, q=q)); t = segs[-1]["e"]
+        segs.append(dict(kind="q", s=t, e=t + QLEN, i=i, q=q)); t += QLEN
     segs.append(dict(kind="outro", s=t, e=t + outro_len)); total = t + outro_len
 
     # 音频
-    audio = music(total); sfx = [(0.05, ding())]
+    audio = music(total); sfx = []
     for sg in segs:
         if sg["kind"] != "q": continue
         s0 = sg["s"]
-        for k in range(len(sg["q"]["options"])): sfx.append((s0 + 0.5 + k * 0.25, pop()))
-        for k in range(3): sfx.append((s0 + T_IN + k, tick()))
+        if sg["i"] > 0:
+            for k in range(len(sg["q"]["options"])): sfx.append((s0 + 0.05 + k * 0.12, pop()))
+        for k in range(2): sfx.append((s0 + T_IN + k, tick()))
         r = s0 + T_IN + T_CD
-        sfx.append((r, buzz())); sfx.append((r + 0.45, ding()))
+        sfx.append((r, buzz())); sfx.append((r + 0.4, ding()))
     sfx.append((total - outro_len, ding()))
     for st, a in sfx:
         s = int(st * SR); e = min(len(audio), s + len(a)); audio[s:e] += a[:e - s]
@@ -149,34 +184,28 @@ def main(sp, out, cover_out):
                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k", "-shortest",
                            "-movflags", "+faststart", out], stdin=subprocess.PIPE)
 
+    follow_q = min(1, len(qs) - 1)   # 第 2 题解释阶段出关注提示
+
     def render(tt):
         sg = next((x for x in segs if x["s"] <= tt < x["e"]), segs[-1])
         img = bg.copy(); d = ImageDraw.Draw(img)
         lt = tt - sg["s"]
-        if sg["kind"] == "hook":
-            header(d, meta, None)
-            for k, (txt, f, col, y) in enumerate([(S["hook"][0], 78, INK, 720), (S["hook"][1], 120, RED, 880)]):
-                p = ease_out((lt - 0.1 - 0.35 * k) / 0.4)
-                if p > 0:
-                    d.text((W / 2, y + 40 * (1 - p)), txt, font=font(FONT_K, int(f * (0.6 + 0.4 * p))),
-                           fill=col, anchor="mm")
-            p = ease_out((lt - 1.1) / 0.4)
-            if p > 0:
-                rrect(d, [W / 2 - 360, 1060, W / 2 + 360, 1170], 55, NAVY)
-                d.text((W / 2, 1115), S["hook"][2], font=font(FONT_B, 50), fill=(255, 255, 255), anchor="mm")
-        elif sg["kind"] == "q":
+        if sg["kind"] == "q":
             q, i = sg["q"], sg["i"]
-            header(d, meta, f"第 {i + 1} / {len(qs)} 题")
-            fz = font(FONT_B, 56)
-            d.text((W / 2, 400), "想说：", font=font(FONT_R, 44), fill=(120, 110, 95), anchor="mm")
-            y = 470
-            for l in zh_wrap(q["prompt"], fz, W - 160, d):
-                d.text((W / 2, y), l, font=fz, fill=INK, anchor="ma"); y += 76
-            d.text((W / 2, y + 20), "哪句更地道？", font=font(FONT_R, 44), fill=(120, 110, 95), anchor="ma")
+            header(d, meta, f"第 {i + 1}/{len(qs)} 题")
+            d.text((W / 2, 290), "想说：", font=font(FONT_R, 44), fill=(120, 110, 95), anchor="mm")
+            fz, plines = balanced_lines(q["prompt"], FONT_B, 72, W - 140, d)
+            y = 345
+            for l in plines:
+                d.text((W / 2, y), l, font=fz, fill=INK, anchor="ma"); y += int(fz.size * 1.32)
+            ask = q.get("ask", "你会选哪个？")
+            rrect(d, [W / 2 - 230, y + 34, W / 2 + 230, y + 114], 40, RED)
+            d.text((W / 2, y + 74), ask, font=font(FONT_K, 46), fill=(255, 255, 255), anchor="mm")
             revealed = lt >= T_IN + T_CD
-            oy = 760
+            oy = y + 165
             for k, opt in enumerate(q["options"]):
-                p = ease_out((lt - 0.5 - k * 0.25) / 0.35)
+                # 第 1 题第一帧就完整显示；之后的题快速滑入
+                p = 1.0 if i == 0 else ease_out((lt - 0.05 - k * 0.12) / 0.25)
                 if p <= 0: continue
                 right = (k == q["answer"])
                 state = "normal"
@@ -187,32 +216,52 @@ def main(sp, out, cover_out):
                 if state == "wrong" and lt < T_IN + T_CD + 0.4:
                     dx = int(14 * math.sin((lt - T_IN - T_CD) * 60))
                 xo = int(-W * (1 - p)) + dx
-                option_card(d, (70 + xo, oy, W - 70 + xo, oy + 170), "ABC"[k], opt, state)
-                oy += 210
-            if T_IN <= lt < T_IN + T_CD:
-                c = lt - T_IN
-                ring(d, W / 2, oy + 140, 95, c / T_CD, 3 - int(c))
+                option_card(d, (60 + xo, oy, W - 60 + xo, oy + 185), "ABC"[k], opt, state)
+                oy += 220
+            if lt < T_IN + T_CD:
+                c = max(0.0, lt - T_IN)
+                ring(d, W / 2, oy + 120, 85, c / T_CD if lt >= T_IN else 0, 2 - int(c) if lt >= T_IN else 2)
             if lt >= T_IN + T_CD + T_REV:
-                p = ease_out((lt - T_IN - T_CD - T_REV) / 0.4)
-                top = oy + 40 + int(60 * (1 - p))
-                rrect(d, [60, top, W - 60, top + 520], 40, NAVY)
-                d.text((110, top + 45), "为什么？", font=font(FONT_K, 50), fill=YEL)
-                fr = font(FONT_R, 44); yy = top + 125
-                for l in zh_wrap(q["why"], fr, W - 220, d):
+                p = ease_out((lt - T_IN - T_CD - T_REV) / 0.3)
+                top = oy + 25 + int(50 * (1 - p))
+                fr = font(FONT_R, 44)
+                lines = zh_wrap(q["why"], fr, W - 220, d)
+                h = 130 + 64 * len(lines) + (130 if q.get("extra") else 20)
+                rrect(d, [60, top, W - 60, top + h], 40, NAVY)
+                d.text((110, top + 40), q.get("why_label", "为什么？"), font=font(FONT_K, 50), fill=YEL)
+                yy = top + 120
+                for l in lines:
                     d.text((110, yy), l, font=fr, fill=(255, 255, 255)); yy += 64
                 if q.get("extra"):
-                    yy += 20
-                    d.text((110, yy), "还可以说：", font=font(FONT_B, 42), fill=YEL); yy += 66
-                    d.text((110, yy), q["extra"], font=font(FONT_B, 48), fill=(255, 255, 255))
+                    yy += 16
+                    d.text((110, yy), "还可以说：", font=font(FONT_B, 40), fill=YEL); yy += 60
+                    d.text((110, yy), q["extra"], font=fit_font(d, q["extra"], FONT_B, 48, W - 240), fill=(255, 255, 255))
+            # 中途关注提示
+            if i == follow_q and lt >= T_IN + T_CD + T_REV + 0.5:
+                p = ease_out((lt - T_IN - T_CD - T_REV - 0.5) / 0.3)
+                yb = H - 150 + int(120 * (1 - p))
+                rrect(d, [W / 2 - 300, yb, W / 2 + 300, yb + 86], 43, RED)
+                d.text((W / 2, yb + 43), meta.get("follow", "关注我 · 每天 3 道急救题"),
+                       font=font(FONT_B, 40), fill=(255, 255, 255), anchor="mm")
         else:
             header(d, meta, None)
-            p = ease_out(lt / 0.5)
-            d.text((W / 2, 760 + 40 * (1 - p)), S["outro"][0], font=font(FONT_K, 84), fill=INK, anchor="mm")
-            d.text((W / 2, 900 + 40 * (1 - p)), S["outro"][1], font=font(FONT_K, 64), fill=RED, anchor="mm")
-            p2 = ease_out((lt - 0.6) / 0.4)
-            if p2 > 0:
-                rrect(d, [W / 2 - 330, 1060, W / 2 + 330, 1170], 55, RED)
-                d.text((W / 2, 1115), S["outro"][2], font=font(FONT_B, 50), fill=(255, 255, 255), anchor="mm")
+            p = ease_out(lt / 0.4)
+            o = S["outro"]
+            d.text((W / 2, 520 + 40 * (1 - p)), o[0], font=font(FONT_K, 88), fill=INK, anchor="mm")
+            d.text((W / 2, 650 + 40 * (1 - p)), o[1], font=font(FONT_K, 68), fill=RED, anchor="mm")
+            nxt = S.get("next")
+            if nxt:
+                p2 = ease_out((lt - 0.4) / 0.4)
+                if p2 > 0:
+                    top = 800 + int(60 * (1 - p2))
+                    rrect(d, [70, top, W - 70, top + 300], 40, NAVY)
+                    d.text((W / 2, top + 70), nxt[0], font=font(FONT_B, 46), fill=YEL, anchor="mm")
+                    d.text((W / 2, top + 175), nxt[1], font=fit_font(d, nxt[1], FONT_K, 62, W - 220),
+                           fill=(255, 255, 255), anchor="mm")
+            p3 = ease_out((lt - 0.9) / 0.4)
+            if p3 > 0:
+                rrect(d, [W / 2 - 320, 1190, W / 2 + 320, 1300], 55, RED)
+                d.text((W / 2, 1245), o[2], font=fit_font(d, o[2], FONT_B, 50, 600), fill=(255, 255, 255), anchor="mm")
         return img
 
     n = int(total * FPS)
@@ -220,15 +269,17 @@ def main(sp, out, cover_out):
         ff.stdin.write(render(fi / FPS).tobytes())
     ff.stdin.close(); ff.wait()
 
-    # 封面
+    # 封面（第一帧之外单独上传的封面）
     cv = bg.copy(); d = ImageDraw.Draw(cv)
     header(d, meta, None)
     for k, l in enumerate(S["cover"]):
         col = RED if k == 1 else INK
-        d.text((W / 2, 700 + k * 190), l, font=font(FONT_K, 130 if k == 1 else 96), fill=col, anchor="mm")
+        f = fit_font(d, l, FONT_K, 130 if k == 1 else 96, W - 120)
+        d.text((W / 2, 560 + k * 190), l, font=f, fill=col, anchor="mm")
     q0 = qs[0]
-    option_card(d, (70, 1250, W - 70, 1420), "A", q0["options"][1 - q0["answer"]] if len(q0["options"]) == 2 else q0["options"][0], "wrong")
-    option_card(d, (70, 1470, W - 70, 1640), "B", q0["options"][q0["answer"]], "right")
+    for k, opt in enumerate(q0["options"][:2]):
+        st = "right" if k == q0["answer"] else "wrong"
+        option_card(d, (60, 1150 + k * 220, W - 60, 1335 + k * 220), "ABC"[k], opt, st)
     cv.save(cover_out)
     print(f"done {out} {total:.1f}s")
 

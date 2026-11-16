@@ -1,0 +1,25 @@
+{
+  "meta": {"title": "中式英语急救室", "series": "第 2 期", "follow": "关注我 · 每天 3 道急救题"},
+  "cover": ["这句英语", "你可能天天说错", "老外听了会不舒服"],
+  "questions": [
+    {"prompt": "开会讲完方案，想确认同事听懂没",
+     "ask": "哪句更得体？",
+     "options": ["Does that make sense?", "Do you understand?"], "answer": 0,
+     "why_label": "说错会怎样？",
+     "why": "Do you understand? 没有语法错，但语气像老师问学生，对同事说容易显得你在质疑他的理解能力。Does that make sense? 是在问“我讲清楚了吗”，礼貌得多。",
+     "extra": "Any questions so far?"},
+    {"prompt": "“帮我把灯打开”",
+     "options": ["Can you open the light?", "Can you turn on the light?"], "answer": 1,
+     "why_label": "说错会怎样？",
+     "why": "open 是打开门、窗、盒子这类能掀开的东西。说 open the light，老外会愣一下。灯、电视、空调这类开关设备要用 turn on，关掉用 turn off。",
+     "extra": "Can you turn off the TV?"},
+    {"prompt": "“好久不见”说 Long time no see",
+     "ask": "老外会这么说吗？",
+     "options": ["不会，这是中式英语", "会，老外也常说"], "answer": 1,
+     "why_label": "反转！",
+     "why": "它虽然来自中式直译，但早就被英语吸收了，母语者见到老朋友也常说，语气轻松随意。正式一点可以换个说法。",
+     "extra": "It's been a while!"}
+  ],
+  "outro": ["你答对了几题？", "评论区告诉我！", "关注我 · 每天 3 道急救题"],
+  "next": ["明天第 3 期", "别再只会说 I'm fine"]
+}
